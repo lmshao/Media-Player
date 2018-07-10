@@ -161,7 +161,7 @@ bool Core::playVideo() {
     allocImage(dstFrame);
 
     AVFrame *audioFrame = av_frame_alloc();
-    FILE *fd = fopen("../assets/out_s16le.pcm", "wb");  //just test: ffplay -f f32le -ac 2 -ar 44100 out.pcm
+    FILE *fd = fopen("out_s16le.pcm", "wb");  //just test: ffplay -f f32le -ac 2 -ar 44100 out.pcm
 
     // Initialize an SwsContext for software scaling
     struct SwsContext *sws_ctx = sws_getContext(

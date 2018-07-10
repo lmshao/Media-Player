@@ -22,3 +22,9 @@ $ make
 # make install
 ```
 
+### UI
+#### MacOS screenshot
+![MacOS](MacOS-UI.jpg)
+
+#### Ubuntu screenshot
+![Ubuntu](Ubuntu-UI.jpg)
