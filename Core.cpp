@@ -7,13 +7,14 @@
 #include "Utils.h"
 #include "Control.h"
 
-Core::Core():mFormatCtx(nullptr),mSDLEnv(nullptr){
+Core::Core():mFormatCtx(nullptr),mSDLEnv(nullptr),
+             mAudioInfo(nullptr),mVideoInfo(nullptr){
     mSDLEnv = new SDL_Env;
 }
 
 Core::~Core() {
     delete mSDLEnv;
-    LOG("~CORE()");
+    LOG("~CORE()\n");
 }
 
 bool Core::openMediaFile(const char *file) {
@@ -49,8 +50,7 @@ bool Core::preprocessStream() {
             return false;
         }
 
-        CodecInfo codecInfo = {"video", videoIndex, vCodecCtx};
-        mCodecArray.push_back(codecInfo);
+        mVideoInfo = new CodecInfo(videoIndex, vCodecCtx);
     }
 
     // Find audio stream in the file
@@ -62,8 +62,7 @@ bool Core::preprocessStream() {
             return false;
         }
 
-        CodecInfo codecInfo = {"audio", audioIndex, aCodecCtx};
-        mCodecArray.push_back(codecInfo);
+        mAudioInfo = new CodecInfo(audioIndex, aCodecCtx);
     }
 
     if (videoIndex < 0 && audioIndex < 0) {
@@ -108,27 +107,23 @@ AVCodecContext *Core::openCodecContext(int index) {
 bool Core::initSDL() {
 
     AVCodecContext *codec = nullptr;
-
-    CodecInfo *cinfo = getCodecInfo("video");
-    if (!cinfo) {
-        LOGE("No video CODEC INFO.\n");
-        return false;
+    codec = mVideoInfo->codec;
+    if (!codec) {
+        LOGE("NO video info.\n");
+        return true;
     }
 
-    codec = cinfo->codec;
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER);
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) {
-        LOGE("Failed to initialize SDL - %s\n", SDL_GetError());
-        return false;
-    }
-
+//  flags: 0 / SDL_WINDOW_RESIZABLE / SDL_WINDOW_FULLSCREEN or others
     mSDLEnv->window = SDL_CreateWindow("Gemini Player", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                       codec->width, codec->height, 0);
+                                       codec->width, codec->height, SDL_WINDOW_RESIZABLE);
     if (!mSDLEnv->window) {
         LOGE("Failed to create windows - %s\n", SDL_GetError());
         return false;
     }
 
+//  flags: 0 / SDL_RENDERER_ACCELERATED / SDL_RENDERER_ACCELERATED or others
     mSDLEnv->renderer = SDL_CreateRenderer(mSDLEnv->window, -1, 0);
     if (!mSDLEnv->renderer) {
         LOGE("Failed to create renderer - %s\n", SDL_GetError());
@@ -154,22 +149,19 @@ bool Core::playVideo() {
     int index;
     AVCodecContext *codec;
 
-    CodecInfo *cinfo = getCodecInfo("video");
-    if (!cinfo) {
-        LOGE("No video CODEC INFO.\n");
-        return false;
-    }
-
-    index = cinfo->index;
-    codec = cinfo->codec;
+    index = mVideoInfo->index;
+    codec = mVideoInfo->codec;
 
     int time = 1000 * mFormatCtx->streams[index]->avg_frame_rate.den
                / mFormatCtx->streams[index]->avg_frame_rate.num;
 
     AVPacket packet;
     AVFrame *srcFrame = av_frame_alloc();
-    AVFrame *dstFrame = av_frame_alloc();;
+    AVFrame *dstFrame = av_frame_alloc();
     allocImage(dstFrame);
+
+    AVFrame *audioFrame = av_frame_alloc();
+    FILE *fd = fopen("../assets/out_s16le.pcm", "wb");  //just test: ffplay -f f32le -ac 2 -ar 44100 out.pcm
 
     // Initialize an SwsContext for software scaling
     struct SwsContext *sws_ctx = sws_getContext(
@@ -177,7 +169,7 @@ bool Core::playVideo() {
             codec->width, codec->height, AV_PIX_FMT_YUV420P,
             SWS_BILINEAR, nullptr, nullptr, nullptr);
 
-    while (av_read_frame(mFormatCtx, &packet) >= 0 && Control::Instance()->isRunning() ) {
+    while (av_read_frame(mFormatCtx, &packet) >= 0 && Control::Instance()->isRunning()) {
         Control::Instance()->handleEvents();
         while (Control::Instance()->isPause()) {
             Control::Instance()->handleEvents();
@@ -185,31 +177,44 @@ bool Core::playVideo() {
         }
 
         // Is this a packet from the video stream?
-        if (packet.stream_index == index) {
+        if (mVideoInfo && packet.stream_index == mVideoInfo->index) {
 
             // Decode the video frame
-            avcodec_send_packet(codec, &packet);
-            int ret = avcodec_receive_frame(codec, srcFrame);
+            avcodec_send_packet(mVideoInfo->codec, &packet);
+            int ret = avcodec_receive_frame(mVideoInfo->codec, srcFrame);
             if (ret) continue;
 
-            // Convert the image from its native format to RGB
+            // Convert the image from its native format to YUV420P
             sws_scale(sws_ctx, (uint8_t const * const *)srcFrame->data,
-                      srcFrame->linesize, 0, codec->height,
+                      srcFrame->linesize, 0, mVideoInfo->codec->height,
                       dstFrame->data, dstFrame->linesize);
 
-            SDL_UpdateYUVTexture(mSDLEnv->texture, mSDLEnv->rectangle,
-                                 dstFrame->data[0], dstFrame->linesize[0],
-                                 dstFrame->data[1], dstFrame->linesize[1],
-                                 dstFrame->data[2], dstFrame->linesize[2]
-            );
-
-            render();
+            displayImage(dstFrame);
             SDL_Delay(time);
 
             // Free the packet that was allocated by av_read_frame
-            av_packet_unref(&packet);
         }
+
+        if (mAudioInfo && packet.stream_index == mAudioInfo->index){
+            avcodec_send_packet(mAudioInfo->codec, &packet);
+            int ret = avcodec_receive_frame(mAudioInfo->codec, audioFrame);
+            if (ret) continue;
+
+            int sampleBytes = av_get_bytes_per_sample(mAudioInfo->codec->sample_fmt);
+
+            // write audio file for Planar sample format
+            for (int i = 0; i < audioFrame->nb_samples; i++)
+                for (int ch = 0; ch < audioFrame->channels; ch++)
+                    fwrite(audioFrame->data[ch] + sampleBytes*i, 1, sampleBytes, fd);
+
+        }
+
+        av_packet_unref(&packet);
+
     }
+    fclose(fd);
+    av_frame_free(&audioFrame);
+
     av_freep(&dstFrame->data[0]);
     av_frame_free(&srcFrame);
     av_frame_free(&dstFrame);
@@ -222,20 +227,10 @@ bool Core::playAudio() {
 }
 
 bool Core::allocImage(AVFrame *image) {
-    AVCodecContext *codec;
-
-    CodecInfo *cinfo = getCodecInfo("video");
-    if (!cinfo) {
-        LOGE("No video CODEC INFO.\n");
-        return false;
-    }
-
-    codec = cinfo->codec;
-
     int ret = 0;
     image->format = AV_PIX_FMT_YUV420P;
-    image->width = codec->width;
-    image->height = codec->height;
+    image->width = mVideoInfo->codec->width;
+    image->height = mVideoInfo->codec->height;
 
     // Allocate an image, and fill pointers and linesizes accordingly.
     ret = av_image_alloc(image->data, image->linesize, image->width,
@@ -244,31 +239,34 @@ bool Core::allocImage(AVFrame *image) {
     return (ret >= 0);
 }
 
-void Core::render() {
+void Core::displayImage(AVFrame *data){
+
+    SDL_UpdateYUVTexture(mSDLEnv->texture, mSDLEnv->rectangle,
+                         data->data[0], data->linesize[0],
+                         data->data[1], data->linesize[1],
+                         data->data[2], data->linesize[2]);
+
     SDL_RenderClear(mSDLEnv->renderer);
 
-    SDL_RenderCopy(mSDLEnv->renderer, mSDLEnv->texture, NULL, mSDLEnv->rectangle);
-
     // Set apative size image
-    // SDL_RenderCopy(mSDLEnv->renderer, mSDLEnv->texture, NULL, NULL);
+     SDL_RenderCopy(mSDLEnv->renderer, mSDLEnv->texture, nullptr, nullptr);
+
+//    SDL_RenderCopy(mSDLEnv->renderer, mSDLEnv->texture, NULL, mSDLEnv->rectangle);
 
     SDL_RenderPresent(mSDLEnv->renderer);
-}
-
-Core::CodecInfo *Core::getCodecInfo(string type) {
-    for (int i = 0; i < mCodecArray.size(); ++i) {
-        if (mCodecArray[i].type == type) {
-            return &mCodecArray[i];
-        }
-    }
-    return nullptr;
 }
 
 void Core::cleanUp() {
     Control::Destroy();
 
-    for (int i = 0; i < mCodecArray.size(); ++i) {
-        avcodec_close(mCodecArray[i].codec);
+    if (mVideoInfo) {
+        avcodec_close(mVideoInfo->codec);
+        delete mVideoInfo;
+    }
+
+    if (mAudioInfo) {
+        avcodec_close(mAudioInfo->codec);
+        delete mAudioInfo;
     }
 
     avformat_close_input(&mFormatCtx);
@@ -276,10 +274,5 @@ void Core::cleanUp() {
     SDL_DestroyWindow(mSDLEnv->window);
     SDL_DestroyRenderer(mSDLEnv->renderer);
     SDL_Quit();
-    LOG("Clean Up");
+    LOG("Clean Up.\n");
 }
-
-
-
-
-

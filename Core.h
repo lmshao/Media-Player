@@ -5,12 +5,6 @@
 #ifndef MEDIA_PLAYER_CORE_H
 #define MEDIA_PLAYER_CORE_H
 
-#include <string>
-#include <map>
-#include <vector>
-
-using namespace std;
-
 #include "SDL2/SDL.h"
 #include "SDL2/SDL_thread.h"
 
@@ -58,21 +52,20 @@ public:
 
 private:
     bool allocImage(AVFrame *image);
-    void render();
+    void displayImage(AVFrame *data);
 
-    AVFormatContext     *mFormatCtx;
-    SDL_Env            *mSDLEnv;
+    AVFormatContext *mFormatCtx;
+    SDL_Env         *mSDLEnv;
 
     struct CodecInfo{
-        string  type;
-        int     index;
+        CodecInfo(int index, AVCodecContext *codec):
+                index(index), codec(codec) {}
+
+        int index;
         AVCodecContext *codec;
     };
 
-    vector<CodecInfo> mCodecArray;
-
-    CodecInfo* getCodecInfo(string type);
-
+    CodecInfo *mAudioInfo, *mVideoInfo;
 };
 
 
