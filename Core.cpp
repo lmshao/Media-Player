@@ -13,6 +13,7 @@ Core::Core():mFormatCtx(nullptr),mSDLEnv(nullptr){
 
 Core::~Core() {
     delete mSDLEnv;
+    LOG("~CORE()");
 }
 
 bool Core::openMediaFile(const char *file) {
@@ -33,7 +34,7 @@ bool Core::openMediaFile(const char *file) {
 }
 
 
-bool Core::openCodecContext() {
+bool Core::preprocessStream() {
     int videoIndex, audioIndex;
     AVCodecContext *vCodecCtx = nullptr;
     AVCodecContext *aCodecCtx = nullptr;
@@ -42,28 +43,10 @@ bool Core::openCodecContext() {
     videoIndex = av_find_best_stream(mFormatCtx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (videoIndex >= 0) {
 
-        AVCodec *dec = avcodec_find_decoder(mFormatCtx->streams[videoIndex]->codecpar->codec_id);
-        if (!dec) {
-            printf("Failed to find codec!\n");
-            return true;
-        }
-
-        // Allocate a codec context for the decoder
-        vCodecCtx = avcodec_alloc_context3(dec);
-        if (!vCodecCtx) {
-            LOGE("Failed to allocate the codec context\n");
+        vCodecCtx = openCodecContext(videoIndex);
+        if (!vCodecCtx){
+            LOGE("openCodecContext error.\n");
             return false;
-        }
-
-        if (avcodec_parameters_to_context(vCodecCtx, mFormatCtx->streams[videoIndex]->codecpar) < 0) {
-            LOGE("Failed to copy codec parameters to decoder context!\n");
-            return false;
-        }
-
-        // Initialize the AVCodecContext to use the given Codec
-        if (avcodec_open2(vCodecCtx, dec, NULL) < 0) {
-            LOGE("Failed to open codec\n");
-            return true;
         }
 
         CodecInfo codecInfo = {"video", videoIndex, vCodecCtx};
@@ -73,7 +56,11 @@ bool Core::openCodecContext() {
     // Find audio stream in the file
     audioIndex = av_find_best_stream(mFormatCtx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
     if (audioIndex >= 0) {
-        LOGD("file has a audio track\n");
+        aCodecCtx = openCodecContext(audioIndex);
+        if (!vCodecCtx){
+            LOGE("openCodecContext error.\n");
+            return false;
+        }
 
         CodecInfo codecInfo = {"audio", audioIndex, aCodecCtx};
         mCodecArray.push_back(codecInfo);
@@ -87,9 +74,40 @@ bool Core::openCodecContext() {
     return true;
 }
 
+AVCodecContext *Core::openCodecContext(int index) {
+    AVCodecContext *codecCtx = nullptr;
+    AVCodec *dec = nullptr;
+
+    dec = avcodec_find_decoder(mFormatCtx->streams[index]->codecpar->codec_id);
+    if (!dec) {
+        LOGE("Failed to find codec!\n");
+        return nullptr;
+    }
+
+    // Allocate a codec context for the decoder
+    codecCtx = avcodec_alloc_context3(dec);
+    if (!codecCtx) {
+        LOGE("Failed to allocate the codec context\n");
+        return nullptr;
+    }
+
+    if (avcodec_parameters_to_context(codecCtx, mFormatCtx->streams[index]->codecpar) < 0) {
+        LOGE("Failed to copy codec parameters to decoder context!\n");
+        return nullptr;
+    }
+
+    // Initialize the AVCodecContext to use the given Codec
+    if (avcodec_open2(codecCtx, dec, nullptr) < 0) {
+        LOGE("Failed to open codec\n");
+        return nullptr;
+    }
+
+    return codecCtx;
+}
+
 bool Core::initSDL() {
 
-    AVCodecContext *codec;
+    AVCodecContext *codec = nullptr;
 
     CodecInfo *cinfo = getCodecInfo("video");
     if (!cinfo) {
@@ -107,20 +125,20 @@ bool Core::initSDL() {
     mSDLEnv->window = SDL_CreateWindow("Gemini Player", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                        codec->width, codec->height, 0);
     if (!mSDLEnv->window) {
-        printf("Failed to create windows - %s\n", SDL_GetError());
+        LOGE("Failed to create windows - %s\n", SDL_GetError());
         return false;
     }
 
     mSDLEnv->renderer = SDL_CreateRenderer(mSDLEnv->window, -1, 0);
     if (!mSDLEnv->renderer) {
-        printf("Failed to create renderer - %s\n", SDL_GetError());
+        LOGE("Failed to create renderer - %s\n", SDL_GetError());
         return false;
     }
 
     mSDLEnv->texture = SDL_CreateTexture(mSDLEnv->renderer, SDL_PIXELFORMAT_YV12,
                                  SDL_TEXTUREACCESS_STREAMING, codec->width, codec->height);
     if (!mSDLEnv->texture) {
-        printf("Failed to create texture - %s\n", SDL_GetError());
+        LOGE("Failed to create texture - %s\n", SDL_GetError());
         return false;
     }
 
@@ -157,7 +175,7 @@ bool Core::playVideo() {
     struct SwsContext *sws_ctx = sws_getContext(
             codec->width, codec->height, codec->pix_fmt,
             codec->width, codec->height, AV_PIX_FMT_YUV420P,
-            SWS_BILINEAR, NULL, NULL, NULL);
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
 
     while (av_read_frame(mFormatCtx, &packet) >= 0 && Control::Instance()->isRunning() ) {
         Control::Instance()->handleEvents();
@@ -196,6 +214,10 @@ bool Core::playVideo() {
     av_frame_free(&srcFrame);
     av_frame_free(&dstFrame);
 
+    return true;
+}
+
+bool Core::playAudio() {
     return false;
 }
 
@@ -240,6 +262,21 @@ Core::CodecInfo *Core::getCodecInfo(string type) {
         }
     }
     return nullptr;
+}
+
+void Core::cleanUp() {
+    Control::Destroy();
+
+    for (int i = 0; i < mCodecArray.size(); ++i) {
+        avcodec_close(mCodecArray[i].codec);
+    }
+
+    avformat_close_input(&mFormatCtx);
+
+    SDL_DestroyWindow(mSDLEnv->window);
+    SDL_DestroyRenderer(mSDLEnv->renderer);
+    SDL_Quit();
+    LOG("Clean Up");
 }
 
 

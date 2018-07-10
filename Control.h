@@ -10,6 +10,7 @@
 class Control {
 public:
     static Control* Instance();
+    static void Destroy();
 
     void handleEvents();
 

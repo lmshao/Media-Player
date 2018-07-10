@@ -41,17 +41,22 @@ public:
 class Core {
 public:
     Core();
+    virtual ~Core();
 
     bool openMediaFile(const char* file);
-    bool openCodecContext();
+
+    bool preprocessStream();
+
+    AVCodecContext* openCodecContext(int index);
 
     bool initSDL();
 
     bool playVideo();
+    bool playAudio();
+
+    void cleanUp();
 
 private:
-    virtual ~Core();
-
     bool allocImage(AVFrame *image);
     void render();
 

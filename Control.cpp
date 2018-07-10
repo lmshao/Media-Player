@@ -13,6 +13,12 @@ Control *Control::Instance() {
     return gInstance;
 }
 
+void Control::Destroy() {
+    if (gInstance) {
+        delete gInstance;
+    }
+}
+
 Control::Control() {
     mRunning = true;
     mPause = false;

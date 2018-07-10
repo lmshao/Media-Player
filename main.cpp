@@ -12,7 +12,7 @@ int main(int argc, char *argv[])
     if (!res)
         res = core->openMediaFile(fileName2);
 
-    res = core->openCodecContext();
+    res = core->preprocessStream();
     if (!res)
         return 1;
 
@@ -24,5 +24,8 @@ int main(int argc, char *argv[])
     if (!res)
         return 1;
 
+    core->cleanUp();
+
+    delete core;
     return 0;
 }
