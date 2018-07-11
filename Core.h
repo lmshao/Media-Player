@@ -53,6 +53,7 @@ public:
 private:
     bool allocImage(AVFrame *image);
     void displayImage(AVFrame *data);
+    static void sdlAudioCallback(void *userdata, Uint8 *stream, int len);
 
     AVFormatContext *mFormatCtx;
     SDL_Env         *mSDLEnv;

@@ -142,6 +142,19 @@ bool Core::initSDL() {
     mSDLEnv->rectangle->w = codec->width;
     mSDLEnv->rectangle->h = codec->height;
 
+    SDL_AudioSpec audioSpec;
+    audioSpec.freq = mAudioInfo->codec->sample_rate;
+    audioSpec.format = AUDIO_S32LSB; //s32le AV_SAMPLE_FMT_FLTP
+    audioSpec.channels = (Uint8)mAudioInfo->codec->channels;
+    audioSpec.samples = (Uint16)mAudioInfo->codec->frame_size;
+    audioSpec.callback = sdlAudioCallback;
+    if (SDL_OpenAudio(&audioSpec, nullptr) < 0){
+        LOGE("SDL_OpenAudio error.\n");
+        return false;
+    }
+
+
+
     return true;
 }
 
@@ -168,6 +181,12 @@ bool Core::playVideo() {
             codec->width, codec->height, codec->pix_fmt,
             codec->width, codec->height, AV_PIX_FMT_YUV420P,
             SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+    int pcm_buffer_size = 4096;
+    char *pcm_buffer = (char *)malloc(pcm_buffer_size);
+    int data_count=0;
+
+    SDL_PauseAudio(0);  //play audio
 
     while (av_read_frame(mFormatCtx, &packet) >= 0 && Control::Instance()->isRunning()) {
         Control::Instance()->handleEvents();
@@ -206,6 +225,8 @@ bool Core::playVideo() {
             for (int i = 0; i < audioFrame->nb_samples; i++)
                 for (int ch = 0; ch < audioFrame->channels; ch++)
                     fwrite(audioFrame->data[ch] + sampleBytes*i, 1, sampleBytes, fd);
+
+            
 
         }
 
@@ -275,4 +296,19 @@ void Core::cleanUp() {
     SDL_DestroyRenderer(mSDLEnv->renderer);
     SDL_Quit();
     LOG("Clean Up.\n");
+}
+
+static  Uint8  *audio_chunk;
+static  Uint32  audio_len;
+static  Uint8  *audio_pos;
+
+void Core::sdlAudioCallback(void *userdata, Uint8 *stream, int len) {
+    SDL_memset(stream, 0, len);
+    if (audio_len==0)
+        return;
+    len = (len>audio_len?audio_len:len);
+
+    SDL_MixAudio(stream, audio_pos, len, SDL_MIX_MAXVOLUME);
+    audio_pos += len;
+    audio_len -= len;
 }
