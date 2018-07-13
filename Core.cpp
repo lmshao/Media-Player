@@ -7,6 +7,9 @@
 #include "Utils.h"
 #include "Control.h"
 
+static  Uint32  gAudioLen;
+static  Uint8  *gAudioPos;
+
 Core::Core():mFormatCtx(nullptr),mSDLEnv(nullptr),
              mAudioInfo(nullptr),mVideoInfo(nullptr){
     mSDLEnv = new SDL_Env;
@@ -56,6 +59,7 @@ bool Core::preprocessStream() {
     // Find audio stream in the file
     audioIndex = av_find_best_stream(mFormatCtx, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
     if (audioIndex >= 0) {
+
         aCodecCtx = openCodecContext(audioIndex);
         if (!vCodecCtx){
             LOGE("openCodecContext error.\n");
@@ -115,78 +119,98 @@ bool Core::initSDL() {
 
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER);
 
-//  flags: 0 / SDL_WINDOW_RESIZABLE / SDL_WINDOW_FULLSCREEN or others
-    mSDLEnv->window = SDL_CreateWindow("Gemini Player", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                       codec->width, codec->height, SDL_WINDOW_RESIZABLE);
-    if (!mSDLEnv->window) {
-        LOGE("Failed to create windows - %s\n", SDL_GetError());
-        return false;
+    if (mVideoInfo) {
+        //  flags: 0 / SDL_WINDOW_RESIZABLE / SDL_WINDOW_FULLSCREEN or others
+        mSDLEnv->window = SDL_CreateWindow("Gemini Player", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                           codec->width, codec->height, SDL_WINDOW_RESIZABLE);
+        if (!mSDLEnv->window) {
+            LOGE("Failed to create windows - %s\n", SDL_GetError());
+            return false;
+        }
+
+        //  flags: 0 / SDL_RENDERER_ACCELERATED / SDL_RENDERER_ACCELERATED or others
+        mSDLEnv->renderer = SDL_CreateRenderer(mSDLEnv->window, -1, 0);
+        if (!mSDLEnv->renderer) {
+            LOGE("Failed to create renderer - %s\n", SDL_GetError());
+            return false;
+        }
+
+        mSDLEnv->texture = SDL_CreateTexture(mSDLEnv->renderer, SDL_PIXELFORMAT_YV12,
+                                             SDL_TEXTUREACCESS_STREAMING, codec->width, codec->height);
+        if (!mSDLEnv->texture) {
+            LOGE("Failed to create texture - %s\n", SDL_GetError());
+            return false;
+        }
+
+        mSDLEnv->rectangle->x = 0;
+        mSDLEnv->rectangle->y = 0;
+        mSDLEnv->rectangle->w = codec->width;
+        mSDLEnv->rectangle->h = codec->height;
     }
 
-//  flags: 0 / SDL_RENDERER_ACCELERATED / SDL_RENDERER_ACCELERATED or others
-    mSDLEnv->renderer = SDL_CreateRenderer(mSDLEnv->window, -1, 0);
-    if (!mSDLEnv->renderer) {
-        LOGE("Failed to create renderer - %s\n", SDL_GetError());
-        return false;
+    if (mAudioInfo) {
+        SDL_AudioSpec audioSpec;
+        audioSpec.freq = mAudioInfo->codec->sample_rate;
+        audioSpec.format = AUDIO_S16SYS; //s32le AV_SAMPLE_FMT_FLTP
+        audioSpec.channels = (Uint8)mAudioInfo->codec->channels;
+        audioSpec.silence = 0;
+        audioSpec.samples = (Uint16)mAudioInfo->codec->frame_size;
+        audioSpec.callback = sdlAudioCallback;
+        audioSpec.userdata = mAudioInfo->codec;
+        if (SDL_OpenAudio(&audioSpec, nullptr) < 0){
+            LOGE("SDL_OpenAudio error.\n");
+            return false;
+        }
     }
-
-    mSDLEnv->texture = SDL_CreateTexture(mSDLEnv->renderer, SDL_PIXELFORMAT_YV12,
-                                 SDL_TEXTUREACCESS_STREAMING, codec->width, codec->height);
-    if (!mSDLEnv->texture) {
-        LOGE("Failed to create texture - %s\n", SDL_GetError());
-        return false;
-    }
-
-    mSDLEnv->rectangle->x = 0;
-    mSDLEnv->rectangle->y = 0;
-    mSDLEnv->rectangle->w = codec->width;
-    mSDLEnv->rectangle->h = codec->height;
-
-    SDL_AudioSpec audioSpec;
-    audioSpec.freq = mAudioInfo->codec->sample_rate;
-    audioSpec.format = AUDIO_S32LSB; //s32le AV_SAMPLE_FMT_FLTP
-    audioSpec.channels = (Uint8)mAudioInfo->codec->channels;
-    audioSpec.samples = (Uint16)mAudioInfo->codec->frame_size;
-    audioSpec.callback = sdlAudioCallback;
-    if (SDL_OpenAudio(&audioSpec, nullptr) < 0){
-        LOGE("SDL_OpenAudio error.\n");
-        return false;
-    }
-
-
 
     return true;
 }
 
-bool Core::playVideo() {
-    int index;
-    AVCodecContext *codec;
-
-    index = mVideoInfo->index;
-    codec = mVideoInfo->codec;
-
-    int time = 1000 * mFormatCtx->streams[index]->avg_frame_rate.den
-               / mFormatCtx->streams[index]->avg_frame_rate.num;
-
+bool Core::playMedia() {
+    int time = 1;
     AVPacket packet;
-    AVFrame *srcFrame = av_frame_alloc();
-    AVFrame *dstFrame = av_frame_alloc();
-    allocImage(dstFrame);
 
-    AVFrame *audioFrame = av_frame_alloc();
-    FILE *fd = fopen("out_s16le.pcm", "wb");  //just test: ffplay -f f32le -ac 2 -ar 44100 out.pcm
+    AVFrame *srcFrame = nullptr, *dstFrame = nullptr; // for video
+    struct SwsContext *videoSwsCtx = nullptr;
 
-    // Initialize an SwsContext for software scaling
-    struct SwsContext *sws_ctx = sws_getContext(
-            codec->width, codec->height, codec->pix_fmt,
-            codec->width, codec->height, AV_PIX_FMT_YUV420P,
-            SWS_BILINEAR, nullptr, nullptr, nullptr);
+    AVFrame *audioFrame = nullptr; // for audio
+    uint8_t *audioBuff = nullptr;
+    int audioBuffSize = 0;
+    struct SwrContext *audioSwrCtx = nullptr;
 
-    int pcm_buffer_size = 4096;
-    char *pcm_buffer = (char *)malloc(pcm_buffer_size);
-    int data_count=0;
+    if (mVideoInfo) {
+        srcFrame = av_frame_alloc();
+        dstFrame = av_frame_alloc();
+        allocImage(dstFrame);
 
-    SDL_PauseAudio(0);  //play audio
+        // Initialize an SwsContext for software scaling (image format conversion)
+        videoSwsCtx = sws_getContext(
+                mVideoInfo->codec->width, mVideoInfo->codec->height, mVideoInfo->codec->pix_fmt,
+                mVideoInfo->codec->width, mVideoInfo->codec->height, AV_PIX_FMT_YUV420P,
+                SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+        time = 1000 * mFormatCtx->streams[mVideoInfo->index]->avg_frame_rate.den
+               / mFormatCtx->streams[mVideoInfo->index]->avg_frame_rate.num;
+    }
+
+    if (mAudioInfo) {
+        audioFrame = av_frame_alloc();
+
+        audioSwrCtx = swr_alloc_set_opts(audioSwrCtx,
+                                         AV_CH_LAYOUT_STEREO,  /* output channel layout (AV_CH_LAYOUT_*) */
+                                         AV_SAMPLE_FMT_S16,    /* output sample format (AV_SAMPLE_FMT_*) */
+                                         mAudioInfo->codec->sample_rate,  /* output sample rate */
+                                         av_get_default_channel_layout(mAudioInfo->codec->channels),  /* input channel layout (AV_CH_LAYOUT_*) */
+                                         mAudioInfo->codec->sample_fmt,   /* input sample format (AV_SAMPLE_FMT_*) */
+                                         mAudioInfo->codec->sample_rate,  /* input sample rate */
+                                         0, nullptr);
+        swr_init(audioSwrCtx);
+
+        audioBuffSize = av_samples_get_buffer_size(nullptr, mAudioInfo->codec->channels, mAudioInfo->codec->frame_size, AV_SAMPLE_FMT_S16, 1);
+        audioBuff = (uint8_t *)av_malloc((size_t)audioBuffSize);
+
+        SDL_PauseAudio(0);  //play audio
+    }
 
     while (av_read_frame(mFormatCtx, &packet) >= 0 && Control::Instance()->isRunning()) {
         Control::Instance()->handleEvents();
@@ -195,56 +219,62 @@ bool Core::playVideo() {
             SDL_Delay(time);
         }
 
-        // Is this a packet from the video stream?
         if (mVideoInfo && packet.stream_index == mVideoInfo->index) {
-
+            LOGD("video ++++\n");
             // Decode the video frame
             avcodec_send_packet(mVideoInfo->codec, &packet);
             int ret = avcodec_receive_frame(mVideoInfo->codec, srcFrame);
             if (ret) continue;
 
             // Convert the image from its native format to YUV420P
-            sws_scale(sws_ctx, (uint8_t const * const *)srcFrame->data,
-                      srcFrame->linesize, 0, mVideoInfo->codec->height,
-                      dstFrame->data, dstFrame->linesize);
+            sws_scale(videoSwsCtx, (uint8_t const * const *)srcFrame->data, srcFrame->linesize,
+                      0, mVideoInfo->codec->height, dstFrame->data, dstFrame->linesize);
 
             displayImage(dstFrame);
             SDL_Delay(time);
-
-            // Free the packet that was allocated by av_read_frame
         }
 
         if (mAudioInfo && packet.stream_index == mAudioInfo->index){
+            LOGD("audio ---\n");
+
             avcodec_send_packet(mAudioInfo->codec, &packet);
             int ret = avcodec_receive_frame(mAudioInfo->codec, audioFrame);
             if (ret) continue;
 
-            int sampleBytes = av_get_bytes_per_sample(mAudioInfo->codec->sample_fmt);
+            int dstNbSample = (int)av_rescale_rnd(audioFrame->nb_samples,
+                    mAudioInfo->codec->sample_rate, mAudioInfo->codec->sample_rate, AV_ROUND_UP);
 
-            // write audio file for Planar sample format
-            for (int i = 0; i < audioFrame->nb_samples; i++)
-                for (int ch = 0; ch < audioFrame->channels; ch++)
-                    fwrite(audioFrame->data[ch] + sampleBytes*i, 1, sampleBytes, fd);
+            swr_convert(audioSwrCtx, &audioBuff, dstNbSample, (const uint8_t **)audioFrame->data, audioFrame->nb_samples);
 
-            
+            gAudioLen = (Uint32)audioBuffSize;
+            gAudioPos = audioBuff;
+
+            while (gAudioLen > 0)
+                SDL_Delay(1);
 
         }
 
         av_packet_unref(&packet);
-
     }
-    fclose(fd);
-    av_frame_free(&audioFrame);
 
-    av_freep(&dstFrame->data[0]);
-    av_frame_free(&srcFrame);
-    av_frame_free(&dstFrame);
+    if (mVideoInfo) {
+        av_frame_free(&srcFrame);
+        av_freep(&dstFrame->data[0]);
+        av_frame_free(&dstFrame);
+
+        if (videoSwsCtx)
+            sws_freeContext(videoSwsCtx);
+    }
+
+    if (mAudioInfo) {
+        av_frame_free(&audioFrame);
+        av_free(audioBuff);
+
+        if (audioSwrCtx)
+            swr_free(&audioSwrCtx);
+    }
 
     return true;
-}
-
-bool Core::playAudio() {
-    return false;
 }
 
 bool Core::allocImage(AVFrame *image) {
@@ -298,17 +328,13 @@ void Core::cleanUp() {
     LOG("Clean Up.\n");
 }
 
-static  Uint8  *audio_chunk;
-static  Uint32  audio_len;
-static  Uint8  *audio_pos;
-
 void Core::sdlAudioCallback(void *userdata, Uint8 *stream, int len) {
-    SDL_memset(stream, 0, len);
-    if (audio_len==0)
+    SDL_memset(stream, 0, len);  // VERY IMPORTANT
+    if (gAudioLen == 0)
         return;
-    len = (len>audio_len?audio_len:len);
 
-    SDL_MixAudio(stream, audio_pos, len, SDL_MIX_MAXVOLUME);
-    audio_pos += len;
-    audio_len -= len;
+    len = (len > gAudioLen ? gAudioLen : len);
+    SDL_MixAudio(stream, gAudioPos, len, SDL_MIX_MAXVOLUME);
+    gAudioPos += len;
+    gAudioLen -= len;
 }

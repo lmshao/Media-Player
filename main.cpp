@@ -20,7 +20,7 @@ int main(int argc, char *argv[])
     if (!res)
         return 1;
 
-    res = core->playVideo();
+    res = core->playMedia();
     if (!res)
         return 1;
 

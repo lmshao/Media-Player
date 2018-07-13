@@ -12,6 +12,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
 #include <libavutil/imgutils.h>
 }
 
@@ -45,8 +46,7 @@ public:
 
     bool initSDL();
 
-    bool playVideo();
-    bool playAudio();
+    bool playMedia();
 
     void cleanUp();
 
