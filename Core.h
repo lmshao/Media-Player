@@ -53,6 +53,8 @@ public:
 private:
     bool allocImage(AVFrame *image);
     void displayImage(AVFrame *data);
+
+    static int decodeAudioPacket();
     static void sdlAudioCallback(void *userdata, Uint8 *stream, int len);
 
     AVFormatContext *mFormatCtx;

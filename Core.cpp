@@ -7,8 +7,16 @@
 #include "Utils.h"
 #include "Control.h"
 
+#include <list>
+using namespace std;
+
 static  Uint32  gAudioLen;
 static  Uint8  *gAudioPos;
+int gAudioBuffSize = 0;
+uint8_t *gAudioBuff = nullptr;
+static struct SwrContext *gAudioSwrCtx = nullptr;
+static AVCodecContext *gAudioCodexCtx = nullptr;
+static list<AVPacket> gAudioPacketList;
 
 Core::Core():mFormatCtx(nullptr),mSDLEnv(nullptr),
              mAudioInfo(nullptr),mVideoInfo(nullptr){
@@ -209,6 +217,11 @@ bool Core::playMedia() {
         audioBuffSize = av_samples_get_buffer_size(nullptr, mAudioInfo->codec->channels, mAudioInfo->codec->frame_size, AV_SAMPLE_FMT_S16, 1);
         audioBuff = (uint8_t *)av_malloc((size_t)audioBuffSize);
 
+        gAudioSwrCtx = audioSwrCtx;
+        gAudioCodexCtx = mAudioInfo->codec;
+        gAudioBuff = audioBuff;
+        gAudioBuffSize = audioBuffSize;
+
         SDL_PauseAudio(0);  //play audio
     }
 
@@ -232,29 +245,15 @@ bool Core::playMedia() {
 
             displayImage(dstFrame);
             SDL_Delay(time);
+
+            av_packet_unref(&packet);
         }
 
         if (mAudioInfo && packet.stream_index == mAudioInfo->index){
             LOGD("audio ---\n");
-
-            avcodec_send_packet(mAudioInfo->codec, &packet);
-            int ret = avcodec_receive_frame(mAudioInfo->codec, audioFrame);
-            if (ret) continue;
-
-            int dstNbSample = (int)av_rescale_rnd(audioFrame->nb_samples,
-                    mAudioInfo->codec->sample_rate, mAudioInfo->codec->sample_rate, AV_ROUND_UP);
-
-            swr_convert(audioSwrCtx, &audioBuff, dstNbSample, (const uint8_t **)audioFrame->data, audioFrame->nb_samples);
-
-            gAudioLen = (Uint32)audioBuffSize;
-            gAudioPos = audioBuff;
-
-            while (gAudioLen > 0)
-                SDL_Delay(1);
-
+            gAudioPacketList.push_back(packet);
+//            SDL_Delay(10);
         }
-
-        av_packet_unref(&packet);
     }
 
     if (mVideoInfo) {
@@ -307,6 +306,51 @@ void Core::displayImage(AVFrame *data){
     SDL_RenderPresent(mSDLEnv->renderer);
 }
 
+int Core::decodeAudioPacket(){
+    if (!gAudioCodexCtx || !gAudioSwrCtx || !gAudioBuff)
+        return -1;
+
+    if (gAudioPacketList.empty())
+        return -1;
+    AVPacket packet = gAudioPacketList.front();
+    gAudioPacketList.pop_front();
+
+    AVFrame *audioFrame = av_frame_alloc();
+
+    avcodec_send_packet(gAudioCodexCtx, &packet);
+    int ret = avcodec_receive_frame(gAudioCodexCtx, audioFrame);
+    if (ret) return 1;
+
+    int dstNbSample = (int)av_rescale_rnd(audioFrame->nb_samples,
+                                          gAudioCodexCtx->sample_rate, gAudioCodexCtx->sample_rate, AV_ROUND_UP);
+    swr_convert(gAudioSwrCtx, &gAudioBuff, dstNbSample, (const uint8_t **)audioFrame->data, audioFrame->nb_samples);
+
+    gAudioLen = (Uint32)gAudioBuffSize;
+    gAudioPos = gAudioBuff;
+
+    av_packet_unref(&packet);
+    av_frame_free(&audioFrame);
+    return 0;
+}
+
+void Core::sdlAudioCallback(void *userdata, Uint8 *stream, int len) {
+    SDL_memset(stream, 0, len);  // VERY IMPORTANT
+
+    if (gAudioLen <= 0) {
+        decodeAudioPacket();
+    }
+
+    if (gAudioLen <= 0) {
+        return; // No data
+    }
+
+    len = (len > gAudioLen ? gAudioLen : len);
+    SDL_MixAudio(stream, gAudioPos, len, SDL_MIX_MAXVOLUME);
+    gAudioPos += len;
+    gAudioLen -= len;
+}
+
+
 void Core::cleanUp() {
     Control::Destroy();
 
@@ -326,15 +370,4 @@ void Core::cleanUp() {
     SDL_DestroyRenderer(mSDLEnv->renderer);
     SDL_Quit();
     LOG("Clean Up.\n");
-}
-
-void Core::sdlAudioCallback(void *userdata, Uint8 *stream, int len) {
-    SDL_memset(stream, 0, len);  // VERY IMPORTANT
-    if (gAudioLen == 0)
-        return;
-
-    len = (len > gAudioLen ? gAudioLen : len);
-    SDL_MixAudio(stream, gAudioPos, len, SDL_MIX_MAXVOLUME);
-    gAudioPos += len;
-    gAudioLen -= len;
 }
