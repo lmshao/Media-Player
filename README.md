@@ -1,6 +1,9 @@
 Media-Player
 ============
 
+*本项目已停止更新，欢迎使用我新开发的播放器项目。* [Aurora Player](https://github.com/lmshao/Aurora)
+*This project is no longer being updated. Feel free to try my newly developed media player project.* [Aurora Player](https://github.com/lmshao/Aurora)
+
 基于FFmpeg (4.0) + SDL2的视频播放器。
 
 系统要求： Linux / MacOS
